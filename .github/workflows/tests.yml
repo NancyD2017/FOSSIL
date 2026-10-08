@@ -1,0 +1,112 @@
+# GitHub Actions: run test_all.sh on push/PR to master
+# Addresses FOSSIL issue #10 ("Run automatic tests on commit", help wanted).
+#
+# Design notes:
+#  - Sequential execution. README warns that benchmarks share temp files,
+#    so parallelism would corrupt runs. No matrix / no -j.
+#  - CVC4 is installed via apt (simplest reproducible path on Ubuntu runners).
+#    Open question for maintainer: is the apt version acceptable, or must we
+#    pin to the 2faf908e source build referenced in the README?
+#  - minisy is installed from the mini-sygus repo (also by muraliadithya).
+#    The benchmark-suite invokes the `minisy` binary; without it every
+#    benchmark fails with "minisy: not found".
+#  - The .sy grammar suite (test_grammars.sh, covers the lvl1 grammars) is in
+#    a separate job triggered only manually, because SyGuS synthesis can be
+#    slow / non-terminating and should not block every push.
+
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:   # allows manual "Run workflow" from the Actions tab
+
+jobs:
+  benchmark-suite:
+    name: benchmark-suite (test_all.sh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make test scripts executable
+        # Sets the executable bit on the Ubuntu runner regardless of whether it
+        # was committed correctly from a Windows contributor's machine.
+        run: chmod +x test_all.sh test_grammars.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install CVC4
+        # NOTE: apt provides CVC4 but the version may differ from the 1.9 / commit
+        # 2faf908e pinned in the README. If reproducibility requires the exact
+        # pinned build, replace this step with a source build at 2faf908e.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cvc4
+          cvc4 --version || cvc4 -version || true
+
+      - name: Install minisy (mini-sygus)
+        # The benchmark-suite invokes the `minisy` binary from the mini-sygus
+        # repo (github.com/muraliadithya/mini-sygus). Without it every
+        # benchmark fails with "minisy: not found".
+        run: |
+          git clone --depth 1 https://github.com/muraliadithya/mini-sygus.git /tmp/mini-sygus
+          pip install -r /tmp/mini-sygus/requirements.txt || true
+          chmod +x /tmp/mini-sygus/scripts/minisy
+          # Put minisy on PATH and mini-sygus package on PYTHONPATH.
+          echo "/tmp/mini-sygus/scripts" >> $GITHUB_PATH
+
+      - name: Set PYTHONPATH (FOSSIL root + mini-sygus)
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE:/tmp/mini-sygus" >> $GITHUB_ENV
+
+      - name: Run test_all.sh
+        run: ./test_all.sh
+
+  grammar-suite:
+    name: grammar-suite (test_grammars.sh, covers lvl1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Run only on manual dispatch to avoid slow SyGuS runs on every push
+    # A maintainer can move this to `on: push` once timings are confirmed.
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make test scripts executable
+        run: chmod +x test_all.sh test_grammars.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install CVC4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cvc4
+          cvc4 --version || cvc4 -version || true
+
+      - name: Set PYTHONPATH
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+
+      - name: Run test_grammars.sh
+        run: ./test_grammars.sh
